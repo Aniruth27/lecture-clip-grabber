@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Link } from "react-router-dom";
+import { useState, useEffect } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
@@ -9,23 +9,13 @@ import {
   AlertCircle, FileArchive, History, ChevronRight, Loader2,
   Youtube, User, Crown, LayoutDashboard
 } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
+import { useToast } from "@/hooks/use-toast";
+import type { Database } from "@/integrations/supabase/types";
 
 type JobStatus = "idle" | "validating" | "extracting" | "deduplicating" | "detecting" | "enhancing" | "packaging" | "done" | "error";
-
-interface Job {
-  id: string;
-  url: string;
-  status: "done" | "error";
-  frames: number;
-  date: string;
-  duration: string;
-}
-
-const MOCK_HISTORY: Job[] = [
-  { id: "1", url: "https://youtube.com/watch?v=dQw4w9WgXcQ", status: "done", frames: 47, date: "2025-03-02", duration: "42:15" },
-  { id: "2", url: "https://youtube.com/watch?v=abc123", status: "done", frames: 31, date: "2025-03-01", duration: "28:00" },
-  { id: "3", url: "https://youtube.com/watch?v=xyz789", status: "error", frames: 0, date: "2025-02-28", duration: "—" },
-];
+type Job = Database["public"]["Tables"]["jobs"]["Row"];
+type Profile = Database["public"]["Tables"]["profiles"]["Row"];
 
 const statusSteps: { status: JobStatus; label: string; progress: number }[] = [
   { status: "validating", label: "Validating YouTube URL...", progress: 10 },
@@ -37,46 +27,132 @@ const statusSteps: { status: JobStatus; label: string; progress: number }[] = [
   { status: "done", label: "Your notes are ready!", progress: 100 },
 ];
 
+const FREE_LIMIT = 3;
+
 const Dashboard = () => {
   const [url, setUrl] = useState("");
   const [jobStatus, setJobStatus] = useState<JobStatus>("idle");
-  const [progress, setProgress] = useState(0);
   const [statusLabel, setStatusLabel] = useState("");
   const [ocrEnabled, setOcrEnabled] = useState(false);
   const [urlError, setUrlError] = useState("");
+  const [currentJobId, setCurrentJobId] = useState<string | null>(null);
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
+  const navigate = useNavigate();
+  const { toast } = useToast();
 
-  const isYoutubeUrl = (u: string) => {
-    return /^https?:\/\/(www\.)?(youtube\.com\/watch\?v=|youtu\.be\/)[\w-]{11}/.test(u);
+  // Auth guard + load data
+  useEffect(() => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (!session) {
+        navigate("/login");
+        return;
+      }
+      setUserId(session.user.id);
+    });
+
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (!session) { navigate("/login"); return; }
+      setUserId(session.user.id);
+      loadProfile(session.user.id);
+      loadJobs(session.user.id);
+    });
+
+    return () => subscription.unsubscribe();
+  }, [navigate]);
+
+  const loadProfile = async (uid: string) => {
+    const { data } = await supabase.from("profiles").select("*").eq("user_id", uid).single();
+    if (data) setProfile(data);
   };
 
-  const startProcessing = () => {
+  const loadJobs = async (uid: string) => {
+    const { data } = await supabase
+      .from("jobs")
+      .select("*")
+      .eq("user_id", uid)
+      .order("created_at", { ascending: false })
+      .limit(10);
+    if (data) setJobs(data);
+  };
+
+  const isYoutubeUrl = (u: string) =>
+    /^https?:\/\/(www\.)?(youtube\.com\/watch\?v=|youtu\.be\/)[\w-]{11}/.test(u);
+
+  const startProcessing = async () => {
     if (!isYoutubeUrl(url)) {
       setUrlError("Please enter a valid YouTube URL (e.g., https://youtube.com/watch?v=...)");
       return;
     }
-    setUrlError("");
-    setJobStatus("validating");
+    if (!userId) return;
 
+    // Check free plan limit
+    if (profile?.plan_type === "free" && (profile?.videos_used_this_month ?? 0) >= FREE_LIMIT) {
+      toast({ title: "Free plan limit reached", description: "Upgrade to Pro for unlimited videos.", variant: "destructive" });
+      return;
+    }
+
+    setUrlError("");
+
+    // Create job in DB
+    const { data: job, error } = await supabase
+      .from("jobs")
+      .insert({ user_id: userId, youtube_url: url, ocr_enabled: ocrEnabled, status: "pending" })
+      .select()
+      .single();
+
+    if (error || !job) {
+      toast({ title: "Failed to create job", description: error?.message, variant: "destructive" });
+      return;
+    }
+
+    setCurrentJobId(job.id);
+
+    // Simulate processing steps and update DB
     let stepIndex = 0;
-    const runStep = () => {
+    const runStep = async () => {
       if (stepIndex < statusSteps.length) {
         const step = statusSteps[stepIndex];
         setJobStatus(step.status);
-        setProgress(step.progress);
         setStatusLabel(step.label);
+
+        await supabase.from("jobs").update({ status: step.status as Job["status"] }).eq("id", job.id);
+
         stepIndex++;
         if (step.status !== "done") {
           setTimeout(runStep, 1800);
+        } else {
+          // Mark complete with mock data
+          await supabase.from("jobs").update({
+            status: "done",
+            frames_extracted: 47,
+            file_size_mb: 8.3,
+            completed_at: new Date().toISOString(),
+          }).eq("id", job.id);
+
+          // Increment usage counter
+          await supabase.from("profiles").update({
+            videos_used_this_month: (profile?.videos_used_this_month ?? 0) + 1
+          }).eq("user_id", userId);
+
+          // Reload data
+          loadJobs(userId);
+          loadProfile(userId);
         }
       }
     };
     runStep();
   };
 
-  const currentProgress = statusSteps.find((s) => s.status === jobStatus)?.progress ?? 0;
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+    navigate("/");
+  };
 
-  const planVideosUsed = 1;
-  const planVideoLimit = 3;
+  const currentProgress = statusSteps.find((s) => s.status === jobStatus)?.progress ?? 0;
+  const planVideosUsed = profile?.videos_used_this_month ?? 0;
+  const planVideoLimit = profile?.plan_type === "pro" ? Infinity : FREE_LIMIT;
 
   return (
     <div className="min-h-screen bg-background flex">
@@ -108,24 +184,28 @@ const Dashboard = () => {
         <div className="rounded-xl bg-gradient-primary-glow border border-primary/20 p-3 mb-4">
           <div className="flex items-center gap-2 mb-2">
             <Zap className="h-3.5 w-3.5 text-primary" />
-            <span className="text-xs font-semibold text-primary">Free Plan</span>
+            <span className="text-xs font-semibold text-primary capitalize">{profile?.plan_type ?? "free"} Plan</span>
           </div>
-          <div className="w-full bg-border rounded-full h-1.5 mb-1.5">
-            <div
-              className="bg-gradient-hero h-1.5 rounded-full transition-all"
-              style={{ width: `${(planVideosUsed / planVideoLimit) * 100}%` }}
-            />
-          </div>
-          <p className="text-xs text-muted-foreground">{planVideosUsed}/{planVideoLimit} videos this month</p>
-          <Link to="/signup?plan=pro">
-            <Button size="sm" className="w-full mt-2 h-7 text-xs btn-glow bg-primary text-primary-foreground border-0">
-              <Crown className="h-3 w-3 mr-1" />
-              Upgrade to Pro
-            </Button>
-          </Link>
+          {profile?.plan_type !== "pro" && (
+            <>
+              <div className="w-full bg-border rounded-full h-1.5 mb-1.5">
+                <div
+                  className="bg-gradient-hero h-1.5 rounded-full transition-all"
+                  style={{ width: `${Math.min((planVideosUsed / FREE_LIMIT) * 100, 100)}%` }}
+                />
+              </div>
+              <p className="text-xs text-muted-foreground">{planVideosUsed}/{FREE_LIMIT} videos this month</p>
+              <Link to="/signup?plan=pro">
+                <Button size="sm" className="w-full mt-2 h-7 text-xs btn-glow bg-primary text-primary-foreground border-0">
+                  <Crown className="h-3 w-3 mr-1" />
+                  Upgrade to Pro
+                </Button>
+              </Link>
+            </>
+          )}
         </div>
 
-        <button className="flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-muted-foreground hover:bg-muted w-full">
+        <button onClick={handleSignOut} className="flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm text-muted-foreground hover:bg-muted w-full">
           <LogOut className="h-4 w-4" />
           Sign Out
         </button>
@@ -154,7 +234,7 @@ const Dashboard = () => {
                   value={url}
                   onChange={(e) => { setUrl(e.target.value); setUrlError(""); }}
                   className="h-11 font-mono text-sm"
-                  disabled={jobStatus !== "idle" && jobStatus !== "error"}
+                  disabled={jobStatus !== "idle" && jobStatus !== "error" && jobStatus !== "done"}
                 />
                 {urlError && (
                   <p className="text-xs text-destructive mt-1 flex items-center gap-1">
@@ -169,15 +249,9 @@ const Dashboard = () => {
                 className="btn-glow bg-primary text-primary-foreground border-0 h-11 px-6 font-semibold shrink-0"
               >
                 {jobStatus !== "idle" && jobStatus !== "done" && jobStatus !== "error" ? (
-                  <>
-                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                    Processing...
-                  </>
+                  <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Processing...</>
                 ) : (
-                  <>
-                    <Upload className="h-4 w-4 mr-2" />
-                    Start Processing
-                  </>
+                  <><Upload className="h-4 w-4 mr-2" />Start Processing</>
                 )}
               </Button>
             </div>
@@ -211,7 +285,6 @@ const Dashboard = () => {
             </div>
 
             <div className="space-y-4">
-              {/* Progress bar */}
               <div>
                 <div className="flex justify-between text-xs text-muted-foreground mb-2">
                   <span>{statusLabel}</span>
@@ -223,13 +296,11 @@ const Dashboard = () => {
                 />
               </div>
 
-              {/* Steps */}
               <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
                 {statusSteps.slice(0, -1).map((step, i) => {
                   const stepIdx = statusSteps.findIndex((s) => s.status === jobStatus);
-                  const thisIdx = i;
-                  const isDone = thisIdx < stepIdx || jobStatus === "done";
-                  const isActive = thisIdx === stepIdx;
+                  const isDone = i < stepIdx || jobStatus === "done";
+                  const isActive = i === stepIdx;
                   return (
                     <div key={i} className={`flex items-center gap-2 rounded-lg p-2 text-xs transition-colors ${
                       isDone ? "text-accent" : isActive ? "text-primary" : "text-muted-foreground"
@@ -247,7 +318,6 @@ const Dashboard = () => {
                 })}
               </div>
 
-              {/* Download button */}
               {jobStatus === "done" && (
                 <div className="flex flex-col sm:flex-row items-center gap-3 pt-2 border-t border-border">
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -274,43 +344,48 @@ const Dashboard = () => {
           </div>
 
           <div className="space-y-2">
-            {MOCK_HISTORY.map((job) => (
-              <div key={job.id} className="flex items-center gap-3 rounded-xl p-3 hover:bg-muted/50 transition-colors group">
-                <div className={`flex h-8 w-8 items-center justify-center rounded-full flex-shrink-0 ${
-                  job.status === "done" ? "bg-accent-light" : "bg-destructive/10"
-                }`}>
-                  {job.status === "done" ? (
-                    <CheckCircle2 className="h-4 w-4 text-accent" />
-                  ) : (
-                    <AlertCircle className="h-4 w-4 text-destructive" />
-                  )}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium truncate text-foreground">{job.url}</p>
-                  <div className="flex items-center gap-3 text-xs text-muted-foreground mt-0.5">
-                    <span className="flex items-center gap-1">
-                      <Clock className="h-3 w-3" />
-                      {job.date}
-                    </span>
-                    {job.status === "done" && (
-                      <>
-                        <span>•</span>
-                        <span>{job.frames} frames</span>
-                        <span>•</span>
-                        <span>{job.duration}</span>
-                      </>
+            {jobs.length === 0 ? (
+              <p className="text-sm text-muted-foreground text-center py-6">No jobs yet — paste a YouTube URL above to get started!</p>
+            ) : (
+              jobs.map((job) => (
+                <div key={job.id} className="flex items-center gap-3 rounded-xl p-3 hover:bg-muted/50 transition-colors group">
+                  <div className={`flex h-8 w-8 items-center justify-center rounded-full flex-shrink-0 ${
+                    job.status === "done" ? "bg-accent-light" : job.status === "error" ? "bg-destructive/10" : "bg-primary/10"
+                  }`}>
+                    {job.status === "done" ? (
+                      <CheckCircle2 className="h-4 w-4 text-accent" />
+                    ) : job.status === "error" ? (
+                      <AlertCircle className="h-4 w-4 text-destructive" />
+                    ) : (
+                      <Loader2 className="h-4 w-4 text-primary animate-spin" />
                     )}
                   </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium truncate text-foreground">{job.youtube_url}</p>
+                    <div className="flex items-center gap-3 text-xs text-muted-foreground mt-0.5">
+                      <span className="flex items-center gap-1">
+                        <Clock className="h-3 w-3" />
+                        {new Date(job.created_at).toLocaleDateString()}
+                      </span>
+                      {job.status === "done" && job.frames_extracted && (
+                        <>
+                          <span>•</span>
+                          <span>{job.frames_extracted} frames</span>
+                          {job.file_size_mb && <><span>•</span><span>{job.file_size_mb} MB</span></>}
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  {job.status === "done" && (
+                    <Button variant="ghost" size="sm" className="opacity-0 group-hover:opacity-100 transition-opacity h-7 gap-1.5 text-xs">
+                      <Download className="h-3 w-3" />
+                      Download
+                      <ChevronRight className="h-3 w-3" />
+                    </Button>
+                  )}
                 </div>
-                {job.status === "done" && (
-                  <Button variant="ghost" size="sm" className="opacity-0 group-hover:opacity-100 transition-opacity h-7 gap-1.5 text-xs">
-                    <Download className="h-3 w-3" />
-                    Download
-                    <ChevronRight className="h-3 w-3" />
-                  </Button>
-                )}
-              </div>
-            ))}
+              ))
+            )}
           </div>
         </div>
       </main>

@@ -14,7 +14,81 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      jobs: {
+        Row: {
+          completed_at: string | null
+          created_at: string
+          download_url: string | null
+          duration: string | null
+          error_message: string | null
+          file_size_mb: number | null
+          frames_extracted: number | null
+          id: string
+          ocr_enabled: boolean
+          status: Database["public"]["Enums"]["job_status"]
+          user_id: string
+          youtube_url: string
+        }
+        Insert: {
+          completed_at?: string | null
+          created_at?: string
+          download_url?: string | null
+          duration?: string | null
+          error_message?: string | null
+          file_size_mb?: number | null
+          frames_extracted?: number | null
+          id?: string
+          ocr_enabled?: boolean
+          status?: Database["public"]["Enums"]["job_status"]
+          user_id: string
+          youtube_url: string
+        }
+        Update: {
+          completed_at?: string | null
+          created_at?: string
+          download_url?: string | null
+          duration?: string | null
+          error_message?: string | null
+          file_size_mb?: number | null
+          frames_extracted?: number | null
+          id?: string
+          ocr_enabled?: boolean
+          status?: Database["public"]["Enums"]["job_status"]
+          user_id?: string
+          youtube_url?: string
+        }
+        Relationships: []
+      }
+      profiles: {
+        Row: {
+          created_at: string
+          email: string | null
+          id: string
+          plan_type: Database["public"]["Enums"]["plan_type"]
+          updated_at: string
+          user_id: string
+          videos_used_this_month: number
+        }
+        Insert: {
+          created_at?: string
+          email?: string | null
+          id?: string
+          plan_type?: Database["public"]["Enums"]["plan_type"]
+          updated_at?: string
+          user_id: string
+          videos_used_this_month?: number
+        }
+        Update: {
+          created_at?: string
+          email?: string | null
+          id?: string
+          plan_type?: Database["public"]["Enums"]["plan_type"]
+          updated_at?: string
+          user_id?: string
+          videos_used_this_month?: number
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
@@ -23,7 +97,17 @@ export type Database = {
       [_ in never]: never
     }
     Enums: {
-      [_ in never]: never
+      job_status:
+        | "pending"
+        | "validating"
+        | "extracting"
+        | "deduplicating"
+        | "detecting"
+        | "enhancing"
+        | "packaging"
+        | "done"
+        | "error"
+      plan_type: "free" | "pro"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -150,6 +234,19 @@ export type CompositeTypes<
 
 export const Constants = {
   public: {
-    Enums: {},
+    Enums: {
+      job_status: [
+        "pending",
+        "validating",
+        "extracting",
+        "deduplicating",
+        "detecting",
+        "enhancing",
+        "packaging",
+        "done",
+        "error",
+      ],
+      plan_type: ["free", "pro"],
+    },
   },
 } as const

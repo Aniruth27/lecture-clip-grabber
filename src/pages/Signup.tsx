@@ -4,16 +4,34 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Zap, Eye, EyeOff, Check } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
+import { useToast } from "@/hooks/use-toast";
 
 const Signup = () => {
   const [showPassword, setShowPassword] = useState(false);
   const [form, setForm] = useState({ name: "", email: "", password: "" });
+  const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
+  const { toast } = useToast();
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    // TODO: integrate with Cloud auth
-    navigate("/dashboard");
+    setLoading(true);
+    const { error } = await supabase.auth.signUp({
+      email: form.email,
+      password: form.password,
+      options: {
+        data: { full_name: form.name },
+        emailRedirectTo: window.location.origin,
+      },
+    });
+    setLoading(false);
+    if (error) {
+      toast({ title: "Sign up failed", description: error.message, variant: "destructive" });
+    } else {
+      toast({ title: "Account created!", description: "Check your email to confirm your account." });
+      navigate("/dashboard");
+    }
   };
 
   const perks = ["3 free videos per month", "No credit card required", "OCR text extraction included"];
@@ -97,8 +115,12 @@ const Signup = () => {
                 </button>
               </div>
             </div>
-            <Button type="submit" className="w-full btn-glow bg-primary text-primary-foreground border-0 h-10 font-semibold">
-              Create Free Account
+            <Button
+              type="submit"
+              disabled={loading}
+              className="w-full btn-glow bg-primary text-primary-foreground border-0 h-10 font-semibold"
+            >
+              {loading ? "Creating account..." : "Create Free Account"}
             </Button>
             <p className="text-center text-xs text-muted-foreground">
               By signing up, you agree to our{" "}
