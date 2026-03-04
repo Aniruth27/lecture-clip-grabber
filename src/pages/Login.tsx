@@ -4,17 +4,27 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Zap, Eye, EyeOff } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
+import { useToast } from "@/hooks/use-toast";
 
 const Login = () => {
   const [showPassword, setShowPassword] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
+  const { toast } = useToast();
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    // TODO: integrate with Cloud auth
-    navigate("/dashboard");
+    setLoading(true);
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    setLoading(false);
+    if (error) {
+      toast({ title: "Sign in failed", description: error.message, variant: "destructive" });
+    } else {
+      navigate("/dashboard");
+    }
   };
 
   return (
@@ -77,8 +87,12 @@ const Login = () => {
                 </button>
               </div>
             </div>
-            <Button type="submit" className="w-full btn-glow bg-primary text-primary-foreground border-0 h-10 font-semibold">
-              Sign In
+            <Button
+              type="submit"
+              disabled={loading}
+              className="w-full btn-glow bg-primary text-primary-foreground border-0 h-10 font-semibold"
+            >
+              {loading ? "Signing in..." : "Sign In"}
             </Button>
           </form>
         </div>
