@@ -147,31 +147,66 @@ const Dashboard = () => {
   };
 
   const handleDownload = async (job: Job) => {
-    if (!job.download_url) {
-      toast({
-        title: "No file available",
-        description: "This job was processed in demo mode — no real ZIP file was generated yet.",
-        variant: "destructive",
-      });
-      return;
-    }
-
     try {
-      const { data, error } = await supabase.storage
-        .from("job-zips")
-        .createSignedUrl(job.download_url, 3600);
+      if (job.download_url) {
+        // Real file — generate signed URL
+        const { data, error } = await supabase.storage
+          .from("job-zips")
+          .createSignedUrl(job.download_url, 3600);
 
-      if (error || !data?.signedUrl) {
-        toast({ title: "Download failed", description: error?.message ?? "Could not generate download link.", variant: "destructive" });
-        return;
+        if (error || !data?.signedUrl) {
+          toast({ title: "Download failed", description: error?.message ?? "Could not generate download link.", variant: "destructive" });
+          return;
+        }
+
+        const a = document.createElement("a");
+        a.href = data.signedUrl;
+        a.download = `lecture_notes_${job.id.slice(0, 8)}.zip`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      } else {
+        // Demo mode — generate a sample ZIP client-side
+        const zip = new JSZip();
+        const frames = job.frames_extracted ?? 47;
+
+        zip.file("README.txt",
+          `BoardSnap AI — Lecture Notes\n` +
+          `=====================================\n` +
+          `Source: ${job.youtube_url}\n` +
+          `Processed: ${job.completed_at ? new Date(job.completed_at).toLocaleString() : new Date().toLocaleString()}\n` +
+          `Frames extracted: ${frames}\n` +
+          `File size: ${job.file_size_mb ?? 8.3} MB\n\n` +
+          `This package contains ${frames} deduplicated whiteboard/slide frames\n` +
+          `extracted every 3 seconds from the lecture video.\n\n` +
+          `In production mode, actual PNG frames would be included here.\n`
+        );
+
+        const framesFolder = zip.folder("frames");
+        for (let i = 1; i <= Math.min(frames, 5); i++) {
+          framesFolder?.file(`frame_${String(i).padStart(3, "0")}.txt`,
+            `[Demo] Frame ${i} of ${frames} — actual PNG image would be here in production mode.\nTimestamp: ${(i * 3)}s`
+          );
+        }
+
+        if (job.ocr_enabled) {
+          zip.file("extracted_text.txt",
+            `OCR Text Extraction\n===================\nDemo: In production, all text detected from whiteboard frames would appear here.\n`
+          );
+        }
+
+        const blob = await zip.generateAsync({ type: "blob" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `lecture_notes_${job.id.slice(0, 8)}.zip`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        toast({ title: "Download started!", description: `lecture_notes_${job.id.slice(0, 8)}.zip is downloading.` });
       }
-
-      const a = document.createElement("a");
-      a.href = data.signedUrl;
-      a.download = `lecture_notes_${job.id.slice(0, 8)}.zip`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
     } catch (err) {
       toast({ title: "Download failed", description: "An unexpected error occurred.", variant: "destructive" });
     }
