@@ -9,6 +9,7 @@ import {
   AlertCircle, FileArchive, History, ChevronRight, Loader2,
   Youtube, User, Crown, LayoutDashboard
 } from "lucide-react";
+import JSZip from "jszip";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import type { Database } from "@/integrations/supabase/types";
