@@ -27,7 +27,7 @@ const statusSteps: { status: JobStatus; label: string; progress: number }[] = [
   { status: "done", label: "Your notes are ready!", progress: 100 },
 ];
 
-const FREE_LIMIT = 3;
+const FREE_LIMIT = 50;
 
 const Dashboard = () => {
   const [url, setUrl] = useState("");
