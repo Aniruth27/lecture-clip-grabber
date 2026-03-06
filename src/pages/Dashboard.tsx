@@ -355,7 +355,7 @@ const Dashboard = () => {
                     <FileArchive className="h-4 w-4 text-accent" />
                     <span>47 frames extracted • lecture_notes.zip (8.3 MB)</span>
                   </div>
-                  <Button className="btn-glow bg-primary text-primary-foreground border-0 sm:ml-auto gap-2 font-semibold">
+                  <Button onClick={() => currentJobId && handleDownload(jobs.find(j => j.id === currentJobId) ?? { id: currentJobId, download_url: null } as Job)} className="btn-glow bg-primary text-primary-foreground border-0 sm:ml-auto gap-2 font-semibold">
                     <Download className="h-4 w-4" />
                     Download ZIP
                   </Button>
