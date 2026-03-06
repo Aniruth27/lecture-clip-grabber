@@ -408,7 +408,7 @@ const Dashboard = () => {
                     </div>
                   </div>
                   {job.status === "done" && (
-                    <Button variant="ghost" size="sm" className="opacity-0 group-hover:opacity-100 transition-opacity h-7 gap-1.5 text-xs">
+                    <Button variant="ghost" size="sm" onClick={() => handleDownload(job)} className="opacity-0 group-hover:opacity-100 transition-opacity h-7 gap-1.5 text-xs">
                       <Download className="h-3 w-3" />
                       Download
                       <ChevronRight className="h-3 w-3" />
