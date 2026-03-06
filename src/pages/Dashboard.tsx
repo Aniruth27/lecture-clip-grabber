@@ -145,6 +145,37 @@ const Dashboard = () => {
     runStep();
   };
 
+  const handleDownload = async (job: Job) => {
+    if (!job.download_url) {
+      toast({
+        title: "No file available",
+        description: "This job was processed in demo mode — no real ZIP file was generated yet.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    try {
+      const { data, error } = await supabase.storage
+        .from("job-zips")
+        .createSignedUrl(job.download_url, 3600);
+
+      if (error || !data?.signedUrl) {
+        toast({ title: "Download failed", description: error?.message ?? "Could not generate download link.", variant: "destructive" });
+        return;
+      }
+
+      const a = document.createElement("a");
+      a.href = data.signedUrl;
+      a.download = `lecture_notes_${job.id.slice(0, 8)}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } catch (err) {
+      toast({ title: "Download failed", description: "An unexpected error occurred.", variant: "destructive" });
+    }
+  };
+
   const handleSignOut = async () => {
     await supabase.auth.signOut();
     navigate("/");
