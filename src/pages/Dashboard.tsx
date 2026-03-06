@@ -145,6 +145,37 @@ const Dashboard = () => {
     runStep();
   };
 
+  const handleDownload = async (job: Job) => {
+    if (!job.download_url) {
+      toast({
+        title: "No file available",
+        description: "This job was processed in demo mode — no real ZIP file was generated yet.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    try {
+      const { data, error } = await supabase.storage
+        .from("job-zips")
+        .createSignedUrl(job.download_url, 3600);
+
+      if (error || !data?.signedUrl) {
+        toast({ title: "Download failed", description: error?.message ?? "Could not generate download link.", variant: "destructive" });
+        return;
+      }
+
+      const a = document.createElement("a");
+      a.href = data.signedUrl;
+      a.download = `lecture_notes_${job.id.slice(0, 8)}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } catch (err) {
+      toast({ title: "Download failed", description: "An unexpected error occurred.", variant: "destructive" });
+    }
+  };
+
   const handleSignOut = async () => {
     await supabase.auth.signOut();
     navigate("/");
@@ -324,7 +355,7 @@ const Dashboard = () => {
                     <FileArchive className="h-4 w-4 text-accent" />
                     <span>47 frames extracted • lecture_notes.zip (8.3 MB)</span>
                   </div>
-                  <Button className="btn-glow bg-primary text-primary-foreground border-0 sm:ml-auto gap-2 font-semibold">
+                  <Button onClick={() => currentJobId && handleDownload(jobs.find(j => j.id === currentJobId) ?? { id: currentJobId, download_url: null } as Job)} className="btn-glow bg-primary text-primary-foreground border-0 sm:ml-auto gap-2 font-semibold">
                     <Download className="h-4 w-4" />
                     Download ZIP
                   </Button>
@@ -377,7 +408,7 @@ const Dashboard = () => {
                     </div>
                   </div>
                   {job.status === "done" && (
-                    <Button variant="ghost" size="sm" className="opacity-0 group-hover:opacity-100 transition-opacity h-7 gap-1.5 text-xs">
+                    <Button variant="ghost" size="sm" onClick={() => handleDownload(job)} className="opacity-0 group-hover:opacity-100 transition-opacity h-7 gap-1.5 text-xs">
                       <Download className="h-3 w-3" />
                       Download
                       <ChevronRight className="h-3 w-3" />
