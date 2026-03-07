@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,23 +9,22 @@ import {
   AlertCircle, FileArchive, History, ChevronRight, Loader2,
   Youtube, User, Crown, LayoutDashboard
 } from "lucide-react";
-import JSZip from "jszip";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import type { Database } from "@/integrations/supabase/types";
 
-type JobStatus = "idle" | "validating" | "extracting" | "deduplicating" | "detecting" | "enhancing" | "packaging" | "done" | "error";
+type JobStatus = "idle" | "pending" | "validating" | "extracting" | "deduplicating" | "detecting" | "enhancing" | "packaging" | "done" | "error";
 type Job = Database["public"]["Tables"]["jobs"]["Row"];
 type Profile = Database["public"]["Tables"]["profiles"]["Row"];
 
 const statusSteps: { status: JobStatus; label: string; progress: number }[] = [
-  { status: "validating", label: "Validating YouTube URL...", progress: 10 },
-  { status: "extracting", label: "Extracting frames (every 3s)...", progress: 30 },
-  { status: "deduplicating", label: "Removing duplicate frames...", progress: 55 },
-  { status: "detecting", label: "Detecting board content...", progress: 70 },
-  { status: "enhancing", label: "Enhancing image quality...", progress: 85 },
-  { status: "packaging", label: "Packaging ZIP file...", progress: 95 },
-  { status: "done", label: "Your notes are ready!", progress: 100 },
+  { status: "validating",    label: "Validating YouTube URL",     progress: 12 },
+  { status: "extracting",    label: "Extracting frames (every 3s)", progress: 30 },
+  { status: "deduplicating", label: "Removing duplicate frames",  progress: 52 },
+  { status: "detecting",     label: "Detecting board content",    progress: 68 },
+  { status: "enhancing",     label: "Enhancing image quality",    progress: 84 },
+  { status: "packaging",     label: "Packaging ZIP file",         progress: 95 },
+  { status: "done",          label: "Your notes are ready!",      progress: 100 },
 ];
 
 const FREE_LIMIT = 50;
@@ -40,16 +39,15 @@ const Dashboard = () => {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
+  const [processingError, setProcessingError] = useState<string | null>(null);
+  const realtimeChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const navigate = useNavigate();
   const { toast } = useToast();
 
   // Auth guard + load data
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-      if (!session) {
-        navigate("/login");
-        return;
-      }
+      if (!session) { navigate("/login"); return; }
       setUserId(session.user.id);
     });
 
@@ -62,6 +60,63 @@ const Dashboard = () => {
 
     return () => subscription.unsubscribe();
   }, [navigate]);
+
+  // Subscribe to realtime updates for the active job
+  useEffect(() => {
+    if (!currentJobId) return;
+
+    // Cleanup old channel
+    if (realtimeChannelRef.current) {
+      supabase.removeChannel(realtimeChannelRef.current);
+    }
+
+    const channel = supabase
+      .channel(`job-${currentJobId}`)
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "jobs", filter: `id=eq.${currentJobId}` },
+        (payload) => {
+          const updatedJob = payload.new as Job;
+          const newStatus = updatedJob.status as JobStatus;
+
+          const step = statusSteps.find((s) => s.status === newStatus);
+          if (step) {
+            setJobStatus(newStatus);
+            setStatusLabel(step.label);
+          }
+
+          if (newStatus === "done") {
+            setJobs((prev) => {
+              const idx = prev.findIndex((j) => j.id === updatedJob.id);
+              if (idx >= 0) {
+                const updated = [...prev];
+                updated[idx] = updatedJob;
+                return updated;
+              }
+              return [updatedJob, ...prev];
+            });
+            loadProfile(userId!);
+            if (userId) loadJobs(userId);
+          }
+
+          if (newStatus === "error") {
+            setProcessingError(updatedJob.error_message ?? "Processing failed");
+            toast({
+              title: "Processing failed",
+              description: updatedJob.error_message ?? "An error occurred while processing your video.",
+              variant: "destructive",
+            });
+          }
+        }
+      )
+      .subscribe();
+
+    realtimeChannelRef.current = channel;
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [currentJobId, userId]);
 
   const loadProfile = async (uid: string) => {
     const { data } = await supabase.from("profiles").select("*").eq("user_id", uid).single();
@@ -79,7 +134,7 @@ const Dashboard = () => {
   };
 
   const isYoutubeUrl = (u: string) =>
-    /^https?:\/\/(www\.)?(youtube\.com\/watch\?v=|youtu\.be\/)[\w-]{11}/.test(u);
+    /^https?:\/\/(www\.)?(youtube\.com\/(watch\?v=|shorts\/)|youtu\.be\/)[\w-]{11}/.test(u);
 
   const startProcessing = async () => {
     if (!isYoutubeUrl(url)) {
@@ -95,8 +150,9 @@ const Dashboard = () => {
     }
 
     setUrlError("");
+    setProcessingError(null);
 
-    // Create job in DB
+    // Create job record
     const { data: job, error } = await supabase
       .from("jobs")
       .insert({ user_id: userId, youtube_url: url, ocr_enabled: ocrEnabled, status: "pending" })
@@ -109,105 +165,49 @@ const Dashboard = () => {
     }
 
     setCurrentJobId(job.id);
+    setJobStatus("validating");
+    setStatusLabel("Validating YouTube URL");
 
-    // Simulate processing steps and update DB
-    let stepIndex = 0;
-    const runStep = async () => {
-      if (stepIndex < statusSteps.length) {
-        const step = statusSteps[stepIndex];
-        setJobStatus(step.status);
-        setStatusLabel(step.label);
+    // Add to jobs list immediately
+    setJobs((prev) => [job, ...prev]);
 
-        await supabase.from("jobs").update({ status: step.status as Job["status"] }).eq("id", job.id);
+    // Invoke edge function (non-blocking — realtime handles status updates)
+    const { error: fnError } = await supabase.functions.invoke("process-video", {
+      body: { jobId: job.id, youtubeUrl: url, ocrEnabled },
+    });
 
-        stepIndex++;
-        if (step.status !== "done") {
-          setTimeout(runStep, 1800);
-        } else {
-          // Mark complete with mock data
-          await supabase.from("jobs").update({
-            status: "done",
-            frames_extracted: 47,
-            file_size_mb: 8.3,
-            completed_at: new Date().toISOString(),
-          }).eq("id", job.id);
-
-          // Increment usage counter
-          await supabase.from("profiles").update({
-            videos_used_this_month: (profile?.videos_used_this_month ?? 0) + 1
-          }).eq("user_id", userId);
-
-          // Reload data
-          loadJobs(userId);
-          loadProfile(userId);
-        }
-      }
-    };
-    runStep();
+    if (fnError) {
+      setJobStatus("error");
+      setProcessingError(fnError.message ?? "Edge function call failed");
+      await supabase.from("jobs").update({ status: "error", error_message: fnError.message }).eq("id", job.id);
+      toast({ title: "Processing failed", description: fnError.message, variant: "destructive" });
+    }
   };
 
   const handleDownload = async (job: Job) => {
     try {
-      if (job.download_url) {
-        // Real file — generate signed URL
-        const { data, error } = await supabase.storage
-          .from("job-zips")
-          .createSignedUrl(job.download_url, 3600);
-
-        if (error || !data?.signedUrl) {
-          toast({ title: "Download failed", description: error?.message ?? "Could not generate download link.", variant: "destructive" });
-          return;
-        }
-
-        const a = document.createElement("a");
-        a.href = data.signedUrl;
-        a.download = `lecture_notes_${job.id.slice(0, 8)}.zip`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-      } else {
-        // Demo mode — generate a sample ZIP client-side
-        const zip = new JSZip();
-        const frames = job.frames_extracted ?? 47;
-
-        zip.file("README.txt",
-          `BoardSnap AI — Lecture Notes\n` +
-          `=====================================\n` +
-          `Source: ${job.youtube_url}\n` +
-          `Processed: ${job.completed_at ? new Date(job.completed_at).toLocaleString() : new Date().toLocaleString()}\n` +
-          `Frames extracted: ${frames}\n` +
-          `File size: ${job.file_size_mb ?? 8.3} MB\n\n` +
-          `This package contains ${frames} deduplicated whiteboard/slide frames\n` +
-          `extracted every 3 seconds from the lecture video.\n\n` +
-          `In production mode, actual PNG frames would be included here.\n`
-        );
-
-        const framesFolder = zip.folder("frames");
-        for (let i = 1; i <= Math.min(frames, 5); i++) {
-          framesFolder?.file(`frame_${String(i).padStart(3, "0")}.txt`,
-            `[Demo] Frame ${i} of ${frames} — actual PNG image would be here in production mode.\nTimestamp: ${(i * 3)}s`
-          );
-        }
-
-        if (job.ocr_enabled) {
-          zip.file("extracted_text.txt",
-            `OCR Text Extraction\n===================\nDemo: In production, all text detected from whiteboard frames would appear here.\n`
-          );
-        }
-
-        const blob = await zip.generateAsync({ type: "blob" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `lecture_notes_${job.id.slice(0, 8)}.zip`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-
-        toast({ title: "Download started!", description: `lecture_notes_${job.id.slice(0, 8)}.zip is downloading.` });
+      if (!job.download_url) {
+        toast({ title: "No file available", description: "This job has no downloadable file yet.", variant: "destructive" });
+        return;
       }
-    } catch (err) {
+
+      const { data, error } = await supabase.storage
+        .from("job-zips")
+        .createSignedUrl(job.download_url, 3600);
+
+      if (error || !data?.signedUrl) {
+        toast({ title: "Download failed", description: error?.message ?? "Could not generate download link.", variant: "destructive" });
+        return;
+      }
+
+      const a = document.createElement("a");
+      a.href = data.signedUrl;
+      a.download = `lecture_notes_${job.id.slice(0, 8)}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      toast({ title: "Download started!", description: `lecture_notes_${job.id.slice(0, 8)}.zip` });
+    } catch {
       toast({ title: "Download failed", description: "An unexpected error occurred.", variant: "destructive" });
     }
   };
@@ -219,7 +219,7 @@ const Dashboard = () => {
 
   const currentProgress = statusSteps.find((s) => s.status === jobStatus)?.progress ?? 0;
   const planVideosUsed = profile?.videos_used_this_month ?? 0;
-  const planVideoLimit = profile?.plan_type === "pro" ? Infinity : FREE_LIMIT;
+  const isProcessing = jobStatus !== "idle" && jobStatus !== "done" && jobStatus !== "error";
 
   return (
     <div className="min-h-screen bg-background flex">
@@ -301,7 +301,7 @@ const Dashboard = () => {
                   value={url}
                   onChange={(e) => { setUrl(e.target.value); setUrlError(""); }}
                   className="h-11 font-mono text-sm"
-                  disabled={jobStatus !== "idle" && jobStatus !== "error" && jobStatus !== "done"}
+                  disabled={isProcessing}
                 />
                 {urlError && (
                   <p className="text-xs text-destructive mt-1 flex items-center gap-1">
@@ -312,10 +312,10 @@ const Dashboard = () => {
               </div>
               <Button
                 onClick={startProcessing}
-                disabled={!url || (jobStatus !== "idle" && jobStatus !== "done" && jobStatus !== "error")}
+                disabled={!url || isProcessing}
                 className="btn-glow bg-primary text-primary-foreground border-0 h-11 px-6 font-semibold shrink-0"
               >
-                {jobStatus !== "idle" && jobStatus !== "done" && jobStatus !== "error" ? (
+                {isProcessing ? (
                   <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Processing...</>
                 ) : (
                   <><Upload className="h-4 w-4 mr-2" />Start Processing</>
@@ -326,7 +326,7 @@ const Dashboard = () => {
             {/* OCR toggle */}
             <label className="flex items-center gap-2.5 cursor-pointer group">
               <div
-                onClick={() => setOcrEnabled(!ocrEnabled)}
+                onClick={() => !isProcessing && setOcrEnabled(!ocrEnabled)}
                 className={`relative h-5 w-9 rounded-full transition-colors cursor-pointer ${ocrEnabled ? "bg-primary" : "bg-border"}`}
               >
                 <div className={`absolute top-0.5 h-4 w-4 rounded-full bg-card shadow transition-transform ${ocrEnabled ? "translate-x-4" : "translate-x-0.5"}`} />
@@ -349,55 +349,85 @@ const Dashboard = () => {
                   Complete
                 </Badge>
               )}
-            </div>
-
-            <div className="space-y-4">
-              <div>
-                <div className="flex justify-between text-xs text-muted-foreground mb-2">
-                  <span>{statusLabel}</span>
-                  <span>{currentProgress}%</span>
-                </div>
-                <Progress
-                  value={currentProgress}
-                  className={`h-2.5 ${jobStatus !== "done" ? "animate-pulse-glow" : ""}`}
-                />
-              </div>
-
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-                {statusSteps.slice(0, -1).map((step, i) => {
-                  const stepIdx = statusSteps.findIndex((s) => s.status === jobStatus);
-                  const isDone = i < stepIdx || jobStatus === "done";
-                  const isActive = i === stepIdx;
-                  return (
-                    <div key={i} className={`flex items-center gap-2 rounded-lg p-2 text-xs transition-colors ${
-                      isDone ? "text-accent" : isActive ? "text-primary" : "text-muted-foreground"
-                    }`}>
-                      {isDone ? (
-                        <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0" />
-                      ) : isActive ? (
-                        <Loader2 className="h-3.5 w-3.5 flex-shrink-0 animate-spin" />
-                      ) : (
-                        <div className="h-3.5 w-3.5 rounded-full border border-current flex-shrink-0" />
-                      )}
-                      {step.label.replace("...", "")}
-                    </div>
-                  );
-                })}
-              </div>
-
-              {jobStatus === "done" && (
-                <div className="flex flex-col sm:flex-row items-center gap-3 pt-2 border-t border-border">
-                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                    <FileArchive className="h-4 w-4 text-accent" />
-                    <span>47 frames extracted • lecture_notes.zip (8.3 MB)</span>
-                  </div>
-                  <Button onClick={() => currentJobId && handleDownload(jobs.find(j => j.id === currentJobId) ?? { id: currentJobId, download_url: null } as Job)} className="btn-glow bg-primary text-primary-foreground border-0 sm:ml-auto gap-2 font-semibold">
-                    <Download className="h-4 w-4" />
-                    Download ZIP
-                  </Button>
-                </div>
+              {jobStatus === "error" && (
+                <Badge className="bg-destructive/10 text-destructive border-0">
+                  <AlertCircle className="h-3 w-3 mr-1" />
+                  Failed
+                </Badge>
               )}
             </div>
+
+            {jobStatus === "error" ? (
+              <div className="rounded-lg bg-destructive/10 border border-destructive/20 p-4">
+                <p className="text-sm text-destructive font-medium mb-1">Processing failed</p>
+                <p className="text-xs text-destructive/80">{processingError ?? "An unknown error occurred."}</p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="mt-3 h-7 text-xs"
+                  onClick={() => { setJobStatus("idle"); setProcessingError(null); }}
+                >
+                  Try Again
+                </Button>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div>
+                  <div className="flex justify-between text-xs text-muted-foreground mb-2">
+                    <span>{statusLabel}</span>
+                    <span>{currentProgress}%</span>
+                  </div>
+                  <Progress
+                    value={currentProgress}
+                    className={`h-2.5 ${isProcessing ? "animate-pulse-glow" : ""}`}
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                  {statusSteps.slice(0, -1).map((step, i) => {
+                    const stepIdx = statusSteps.findIndex((s) => s.status === jobStatus);
+                    const isDone = i < stepIdx || jobStatus === "done";
+                    const isActive = i === stepIdx;
+                    return (
+                      <div key={i} className={`flex items-center gap-2 rounded-lg p-2 text-xs transition-colors ${
+                        isDone ? "text-accent" : isActive ? "text-primary" : "text-muted-foreground"
+                      }`}>
+                        {isDone ? (
+                          <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0" />
+                        ) : isActive ? (
+                          <Loader2 className="h-3.5 w-3.5 flex-shrink-0 animate-spin" />
+                        ) : (
+                          <div className="h-3.5 w-3.5 rounded-full border border-current flex-shrink-0" />
+                        )}
+                        {step.label}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {jobStatus === "done" && currentJobId && (
+                  <div className="flex flex-col sm:flex-row items-center gap-3 pt-2 border-t border-border">
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                      <FileArchive className="h-4 w-4 text-accent" />
+                      <span>
+                        {jobs.find(j => j.id === currentJobId)?.frames_extracted ?? "?"} frames •{" "}
+                        {jobs.find(j => j.id === currentJobId)?.file_size_mb ?? "?"} MB
+                      </span>
+                    </div>
+                    <Button
+                      onClick={() => {
+                        const job = jobs.find(j => j.id === currentJobId);
+                        if (job) handleDownload(job);
+                      }}
+                      className="btn-glow bg-primary text-primary-foreground border-0 sm:ml-auto gap-2 font-semibold"
+                    >
+                      <Download className="h-4 w-4" />
+                      Download ZIP
+                    </Button>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -441,9 +471,12 @@ const Dashboard = () => {
                           {job.file_size_mb && <><span>•</span><span>{job.file_size_mb} MB</span></>}
                         </>
                       )}
+                      {job.status === "error" && (
+                        <span className="text-destructive">{job.error_message?.slice(0, 40)}</span>
+                      )}
                     </div>
                   </div>
-                  {job.status === "done" && (
+                  {job.status === "done" && job.download_url && (
                     <Button variant="ghost" size="sm" onClick={() => handleDownload(job)} className="opacity-0 group-hover:opacity-100 transition-opacity h-7 gap-1.5 text-xs">
                       <Download className="h-3 w-3" />
                       Download
