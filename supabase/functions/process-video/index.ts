@@ -6,24 +6,29 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
-// InnerTube Android client context — returns storyboard URLs without IP-bound sqp tokens
+// InnerTube TVHTML5 embedded client — permissive, no IP-bound tokens
 const INNERTUBE_CONTEXT = {
   context: {
     client: {
-      clientName: "ANDROID",
-      clientVersion: "19.09.37",
-      androidSdkVersion: 30,
+      clientName: "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
+      clientVersion: "2.0",
       hl: "en",
       gl: "US",
+      utcOffsetMinutes: 0,
+    },
+    thirdParty: {
+      embedUrl: "https://www.youtube.com/",
     },
   },
 };
 
 const INNERTUBE_HEADERS = {
   "Content-Type": "application/json",
-  "User-Agent": "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
-  "X-YouTube-Client-Name": "3",
-  "X-YouTube-Client-Version": "19.09.37",
+  "User-Agent": "Mozilla/5.0 (SMART-TV; LINUX; Tizen 5.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/5.0 TV Safari/538.1",
+  "X-YouTube-Client-Name": "85",
+  "X-YouTube-Client-Version": "2.0",
+  "Origin": "https://www.youtube.com",
+  "Referer": "https://www.youtube.com/",
 };
 
 Deno.serve(async (req) => {
