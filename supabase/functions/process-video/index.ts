@@ -6,6 +6,26 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
+// InnerTube Android client context — returns storyboard URLs without IP-bound sqp tokens
+const INNERTUBE_CONTEXT = {
+  context: {
+    client: {
+      clientName: "ANDROID",
+      clientVersion: "19.09.37",
+      androidSdkVersion: 30,
+      hl: "en",
+      gl: "US",
+    },
+  },
+};
+
+const INNERTUBE_HEADERS = {
+  "Content-Type": "application/json",
+  "User-Agent": "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
+  "X-YouTube-Client-Name": "3",
+  "X-YouTube-Client-Version": "19.09.37",
+};
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -55,7 +75,7 @@ Deno.serve(async (req) => {
   };
 
   try {
-    // ── STEP 1: Validate & fetch YouTube page ─────────────────────────────────
+    // ── STEP 1: Validate ─────────────────────────────────────────────────────
     await updateJob("validating");
 
     const videoId = extractVideoId(youtubeUrl);
@@ -69,83 +89,44 @@ Deno.serve(async (req) => {
 
     console.log(`[process-video] Processing video: ${videoId}`);
 
-    const pageRes = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-      },
-    });
+    // ── STEP 2: Fetch player data via InnerTube API ───────────────────────────
+    await updateJob("extracting");
 
-    if (!pageRes.ok) {
-      await updateJob("error", { error_message: `Could not fetch YouTube page: HTTP ${pageRes.status}` });
-      return new Response(JSON.stringify({ error: "Could not fetch YouTube page" }), {
+    const playerData = await fetchInnerTubePlayer(videoId);
+
+    if (!playerData) {
+      await updateJob("error", { error_message: "Could not fetch video data from YouTube" });
+      return new Response(JSON.stringify({ error: "Could not fetch video data" }), {
         status: 400,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    const pageHtml = await pageRes.text();
-    console.log(`[process-video] Page fetched, length: ${pageHtml.length}`);
-
-    // ── STEP 2: Parse player data ──────────────────────────────────────────────
-    let playerData: Record<string, unknown> | null = null;
-
-    // Strategy 1: Standard ytInitialPlayerResponse
-    const patterns = [
-      /ytInitialPlayerResponse\s*=\s*(\{.+?\});\s*(?:var |const |let |window\.|<\/script>)/s,
-      /ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;/s,
-      /"ytInitialPlayerResponse":(\{.+?\})\s*[,}]/s,
-    ];
-
-    for (const pat of patterns) {
-      const m = pageHtml.match(pat);
-      if (m) {
-        try {
-          playerData = JSON.parse(m[1]);
-          console.log(`[process-video] Parsed player data with pattern ${patterns.indexOf(pat)}`);
-          break;
-        } catch {
-          continue;
-        }
-      }
-    }
-
-    if (!playerData) {
-      console.log("[process-video] Could not parse ytInitialPlayerResponse, will use thumbnail fallback");
-    }
-
-    // Get video title & duration
     const videoDetails = (playerData?.videoDetails as Record<string, unknown>) ?? {};
     const title = (videoDetails?.title as string) ?? `video_${videoId}`;
     const durationSecs = parseInt((videoDetails?.lengthSeconds as string) ?? "0", 10);
     const durationStr = formatDuration(durationSecs);
+
     console.log(`[process-video] Title: ${title}, Duration: ${durationStr}`);
 
-    // ── STEP 3: Extract frames ─────────────────────────────────────────────────
-    await updateJob("extracting");
-
+    // ── STEP 3: Get storyboard frame URLs ─────────────────────────────────────
     let frameUrls: string[] = [];
 
-    // Try storyboard first
-    if (playerData) {
-      const storyboardSpecs = extractStoryboardSpec(playerData);
-      console.log(`[process-video] Storyboard specs found: ${storyboardSpecs.length}`);
+    const storyboardSpecs = extractStoryboardSpec(playerData);
+    console.log(`[process-video] Storyboard specs found: ${storyboardSpecs.length}`);
 
-      if (storyboardSpecs.length > 0) {
-        frameUrls = await fetchStoryboardFrameUrls(storyboardSpecs, videoId);
-        console.log(`[process-video] Storyboard frame URLs: ${frameUrls.length}`);
-      }
+    if (storyboardSpecs.length > 0) {
+      frameUrls = buildStoryboardUrls(storyboardSpecs[0]);
+      console.log(`[process-video] Storyboard URLs built: ${frameUrls.length}`);
     }
 
-    // Fallback: YouTube thumbnail variants  
+    // Fallback: public YouTube thumbnail variants
     if (frameUrls.length === 0) {
-      console.log("[process-video] Using thumbnail fallback");
+      console.log("[process-video] Falling back to thumbnail URLs");
       frameUrls = getYoutubeThumbnails(videoId);
     }
 
-    console.log(`[process-video] Total frame URLs to download: ${frameUrls.length}`);
+    console.log(`[process-video] Total URLs to download: ${frameUrls.length}`);
 
     // ── STEP 4: Download frames ───────────────────────────────────────────────
     await updateJob("deduplicating");
@@ -157,11 +138,19 @@ Deno.serve(async (req) => {
     const uniqueFrames = deduplicateFrames(downloadedFrames);
     console.log(`[process-video] Unique frames after dedup: ${uniqueFrames.length}`);
 
-    // ── STEP 6: Detect / Enhance (status updates) ────────────────────────────
+    // Ensure we have at least something
+    if (uniqueFrames.length === 0) {
+      await updateJob("error", { error_message: "No frames could be extracted from this video. It may be private or restricted." });
+      return new Response(JSON.stringify({ error: "No frames extracted" }), {
+        status: 422,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     await updateJob("detecting");
     await updateJob("enhancing");
 
-    // ── STEP 7: Package ZIP ───────────────────────────────────────────────────
+    // ── STEP 6: Package ZIP ───────────────────────────────────────────────────
     await updateJob("packaging");
 
     const zipBytes = await buildZip(uniqueFrames, {
@@ -172,9 +161,9 @@ Deno.serve(async (req) => {
       duration: durationStr,
     });
 
-    console.log(`[process-video] ZIP built: ${zipBytes.byteLength} bytes`);
+    console.log(`[process-video] ZIP built: ${zipBytes.byteLength} bytes, ${uniqueFrames.length} frames`);
 
-    // ── STEP 8: Upload to Storage ─────────────────────────────────────────────
+    // ── STEP 7: Upload to Storage ─────────────────────────────────────────────
     const storagePath = `${userId}/${jobId}.zip`;
     const { error: uploadError } = await adminClient.storage
       .from("job-zips")
@@ -193,7 +182,7 @@ Deno.serve(async (req) => {
 
     const fileSizeMb = parseFloat((zipBytes.byteLength / 1024 / 1024).toFixed(2));
 
-    // ── STEP 9: Mark done ─────────────────────────────────────────────────────
+    // ── STEP 8: Mark done ─────────────────────────────────────────────────────
     await updateJob("done", {
       frames_extracted: uniqueFrames.length,
       file_size_mb: fileSizeMb,
@@ -232,6 +221,34 @@ Deno.serve(async (req) => {
   }
 });
 
+// ── InnerTube API ─────────────────────────────────────────────────────────────
+
+async function fetchInnerTubePlayer(videoId: string): Promise<Record<string, unknown> | null> {
+  try {
+    // Use the InnerTube player endpoint directly — Android client gives clean storyboard URLs
+    const res = await fetch(`https://www.youtube.com/youtubei/v1/player`, {
+      method: "POST",
+      headers: INNERTUBE_HEADERS,
+      body: JSON.stringify({
+        ...INNERTUBE_CONTEXT,
+        videoId,
+      }),
+    });
+
+    if (!res.ok) {
+      console.log(`[process-video] InnerTube API error: HTTP ${res.status}`);
+      return null;
+    }
+
+    const data = await res.json();
+    console.log(`[process-video] InnerTube response keys: ${Object.keys(data).join(", ")}`);
+    return data as Record<string, unknown>;
+  } catch (e) {
+    console.error("[process-video] fetchInnerTubePlayer error:", e);
+    return null;
+  }
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 function extractVideoId(url: string): string | null {
@@ -268,30 +285,27 @@ type StoryboardSpec = {
 
 function extractStoryboardSpec(playerData: Record<string, unknown>): StoryboardSpec[] {
   try {
-    // Primary: playerStoryboardSpecRenderer
     const storyboards = (playerData?.storyboards as Record<string, unknown>) ?? {};
     const renderer = storyboards?.playerStoryboardSpecRenderer as Record<string, unknown>;
 
     if (!renderer) {
       console.log("[process-video] No playerStoryboardSpecRenderer found");
+      // Try playerLiveStoryboardSpecRenderer as fallback
       return [];
     }
 
     const spec = renderer?.spec as string;
     if (!spec) {
-      console.log("[process-video] No spec string in renderer");
+      console.log("[process-video] No spec string found");
       return [];
     }
 
-    console.log(`[process-video] Storyboard spec: ${spec.substring(0, 200)}...`);
+    console.log(`[process-video] Storyboard spec: ${spec.substring(0, 300)}`);
 
     const levels = spec.split("|");
-    if (levels.length < 2) {
-      console.log("[process-video] Spec has fewer than 2 pipe-separated parts");
-      return [];
-    }
+    if (levels.length < 2) return [];
 
-    const baseUrl = levels[0];
+    const baseUrlTemplate = levels[0];
     const results: StoryboardSpec[] = [];
 
     for (let i = 1; i < levels.length; i++) {
@@ -303,51 +317,47 @@ function extractStoryboardSpec(playerData: Record<string, unknown>): StoryboardS
       const count = parseInt(parts[2]);
       const cols = parseInt(parts[3]);
       const rows = parseInt(parts[4]);
-      const sighParam = parts[6] ?? "M";
+      // parts[6] is the $N token (e.g. "M$M" or "default")
+      const nToken = parts[6] ?? "M$M";
 
-      // Build the sheet URL template — replace $L with level index and $N with sigh
-      const url = baseUrl
+      // Replace $L = level index (0-based), $N = the sheet-name token
+      const url = baseUrlTemplate
         .replace("$L", String(i - 1))
-        .replace("$N", sighParam);
+        .replace("$N", nToken);
 
-      console.log(`[process-video] Level ${i}: ${width}x${height}, count=${count}, cols=${cols}, rows=${rows}`);
+      console.log(`[process-video] Level ${i}: ${width}x${height}, count=${count}, cols=${cols}, rows=${rows}, url_template=${url.substring(0, 100)}`);
 
       if (width > 0 && height > 0 && count > 0) {
         results.push({ baseUrl: url, rows, cols, frameWidth: width, frameHeight: height, count });
       }
     }
 
-    return results.reverse(); // highest quality first
+    // Return highest quality (largest frame width) first
+    results.sort((a, b) => b.frameWidth - a.frameWidth);
+    return results;
   } catch (e) {
     console.error("[process-video] extractStoryboardSpec error:", e);
     return [];
   }
 }
 
-async function fetchStoryboardFrameUrls(specs: StoryboardSpec[], _videoId: string): Promise<string[]> {
-  // Use the best quality storyboard (first after reverse = highest quality)
-  const spec = specs[0];
+function buildStoryboardUrls(spec: StoryboardSpec): string[] {
   const urls: string[] = [];
   const framesPerSheet = spec.rows * spec.cols;
   const sheetCount = Math.ceil(spec.count / framesPerSheet);
 
-  console.log(`[process-video] Building ${sheetCount} sheet URLs (${framesPerSheet} frames/sheet)`);
-  console.log(`[process-video] Base URL template: ${spec.baseUrl}`);
+  console.log(`[process-video] Building ${sheetCount} sheet URLs (${framesPerSheet} frames/sheet, ${spec.count} total frames)`);
 
-  // The storyboard URL uses "$M" as the sheet-index placeholder.
-  // Example: "https://i.ytimg.com/sb/VIDEO/storyboard3_L2/M$M.jpg?sqp=..."
-  // We replace "$M" with the sheet number 0, 1, 2...
+  // The URL template has "$M" as sheet index placeholder
   for (let i = 0; i < sheetCount; i++) {
     const sheetUrl = spec.baseUrl.replace("$M", String(i));
     urls.push(sheetUrl);
-    console.log(`[process-video] Sheet URL ${i}: ${sheetUrl.substring(0, 100)}`);
   }
 
   return urls;
 }
 
 function getYoutubeThumbnails(videoId: string): string[] {
-  // These are always available without any parsing
   return [
     `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`,
     `https://img.youtube.com/vi/${videoId}/sddefault.jpg`,
@@ -375,37 +385,27 @@ async function downloadFrames(urls: string[]): Promise<FrameData[]> {
           Referer: "https://www.youtube.com/",
         },
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status} for ${url.substring(0, 80)}`);
       const data = new Uint8Array(await res.arrayBuffer());
-      // Skip if tiny (likely a placeholder/error image)
-      if (data.length < 3000) throw new Error(`Image too small (${data.length} bytes), likely placeholder`);
-      const hash = perceptualHash(data);
-      const ext = url.includes(".jpg") || url.includes(".jpeg") ? "jpg" : "png";
+      if (data.length < 3000) throw new Error(`Image too small (${data.length} bytes)`);
+      const hash = contentHash(data);
+      const ext = url.includes(".webp") ? "webp" : "jpg";
       return { name: `frame_${String(idx + 1).padStart(3, "0")}.${ext}`, data, hash };
     })
   );
 
-  let successCount = 0;
-  let failCount = 0;
+  let ok = 0, fail = 0;
   for (const r of results) {
-    if (r.status === "fulfilled") {
-      frames.push(r.value);
-      successCount++;
-    } else {
-      failCount++;
-      console.log(`[process-video] Frame download failed: ${r.reason}`);
-    }
+    if (r.status === "fulfilled") { frames.push(r.value); ok++; }
+    else { console.log(`[process-video] Frame failed: ${r.reason}`); fail++; }
   }
-
-  console.log(`[process-video] Download results: ${successCount} success, ${failCount} failed`);
+  console.log(`[process-video] Download: ${ok} ok, ${fail} failed`);
   return frames;
 }
 
-function perceptualHash(data: Uint8Array): number {
-  // Sample bytes at regular intervals for a fast content hash
+function contentHash(data: Uint8Array): number {
   let hash = 5381;
   const step = Math.max(1, Math.floor(data.length / 300));
-  // Skip JPEG header (first 20 bytes vary with metadata)
   const start = Math.min(20, data.length);
   for (let i = start; i < data.length; i += step) {
     hash = ((hash << 5) + hash) ^ data[i];
@@ -416,14 +416,11 @@ function perceptualHash(data: Uint8Array): number {
 
 function deduplicateFrames(frames: FrameData[]): FrameData[] {
   const seen = new Set<number>();
-  const unique: FrameData[] = [];
-  for (const f of frames) {
-    if (!seen.has(f.hash)) {
-      seen.add(f.hash);
-      unique.push(f);
-    }
-  }
-  return unique;
+  return frames.filter((f) => {
+    if (seen.has(f.hash)) return false;
+    seen.add(f.hash);
+    return true;
+  });
 }
 
 type ZipMeta = {
@@ -446,13 +443,12 @@ Duration: ${meta.duration}
 Extracted: ${new Date().toLocaleString()}
 Frames:   ${frames.length} unique frames
 
-How to use:
------------
+Contents
+--------
 The /frames/ folder contains ${frames.length} unique screenshot frames
-extracted directly from the YouTube video. Use these as your lecture notes,
-slides reference, or for further study.
+extracted directly from the YouTube video storyboard.
 ${meta.ocrEnabled ? "\nOCR text extraction was enabled. See extracted_text.txt for results.\n" : ""}
-Generated by BoardSnap AI — boardsnap.ai
+Generated by BoardSnap AI
 `;
   entries.push({ name: "README.txt", data: new TextEncoder().encode(readme) });
 
@@ -461,14 +457,10 @@ Generated by BoardSnap AI — boardsnap.ai
   }
 
   if (meta.ocrEnabled) {
-    const ocrNote = `OCR Text Extraction Report
-==========================
-Processed: ${new Date().toLocaleString()}
+    const ocrNote = `OCR Text Extraction
+===================
 Frames analyzed: ${frames.length}
-
-Note: Full OCR integration (Google Vision / Tesseract) will extract
-text from whiteboard and slide content in a future update.
-The /frames/ folder contains the source images for manual review.
+Note: Full OCR integration coming soon. The /frames/ folder contains the source images.
 `;
     entries.push({ name: "extracted_text.txt", data: new TextEncoder().encode(ocrNote) });
   }
@@ -476,7 +468,7 @@ The /frames/ folder contains the source images for manual review.
   return createZip(entries);
 }
 
-// ── Minimal ZIP implementation ─────────────────────────────────────────────────
+// ── Minimal ZIP builder ────────────────────────────────────────────────────────
 function createZip(entries: { name: string; data: Uint8Array }[]): Uint8Array {
   const parts: Uint8Array[] = [];
   const centralDir: Uint8Array[] = [];
@@ -495,7 +487,6 @@ function createZip(entries: { name: string; data: Uint8Array }[]): Uint8Array {
   const centralDirOffset = offset;
   const centralDirData = concat(centralDir);
   const eocd = makeEndOfCentralDir(entries.length, centralDirData.length, centralDirOffset);
-
   return concat([...parts, centralDirData, eocd]);
 }
 
@@ -559,10 +550,7 @@ function concat(arrays: Uint8Array[]): Uint8Array {
   const total = arrays.reduce((s, a) => s + a.length, 0);
   const out = new Uint8Array(total);
   let offset = 0;
-  for (const a of arrays) {
-    out.set(a, offset);
-    offset += a.length;
-  }
+  for (const a of arrays) { out.set(a, offset); offset += a.length; }
   return out;
 }
 
@@ -581,9 +569,7 @@ function makeCrc32Table(): Uint32Array {
   const t = new Uint32Array(256);
   for (let n = 0; n < 256; n++) {
     let c = n;
-    for (let k = 0; k < 8; k++) {
-      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    }
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
     t[n] = c;
   }
   return (_crc32Table = t);
