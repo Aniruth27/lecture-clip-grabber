@@ -121,14 +121,33 @@ Deno.serve(async (req) => {
     console.log(`[process-video] Storyboard specs found: ${storyboardSpecs.length}`);
 
     if (storyboardSpecs.length > 0) {
-      frameUrls = buildStoryboardUrls(storyboardSpecs[0]);
-      console.log(`[process-video] Storyboard URLs built: ${frameUrls.length}`);
+      const candidateUrls = buildStoryboardUrls(storyboardSpecs[0]);
+      console.log(`[process-video] Storyboard URLs built: ${candidateUrls.length}`);
+
+      // Test first URL to see if CDN allows server-side access
+      const testUrl = candidateUrls[0];
+      try {
+        const testRes = await fetch(testUrl, { method: "HEAD", headers: { Referer: "https://www.youtube.com/" } });
+        if (testRes.ok || testRes.status === 405) {
+          // 405 = Method Not Allowed but server exists = use these URLs
+          frameUrls = candidateUrls;
+          console.log(`[process-video] Storyboard CDN accessible (status ${testRes.status})`);
+        } else {
+          console.log(`[process-video] Storyboard CDN returned ${testRes.status}, falling back to thumbnails`);
+        }
+      } catch (e) {
+        console.log(`[process-video] Storyboard CDN test failed: ${e}, using thumbnails`);
+      }
     }
 
-    // Fallback: public YouTube thumbnail variants
+    // Always include YouTube thumbnails — they're always accessible
+    const thumbnailUrls = getYoutubeThumbnails(videoId);
     if (frameUrls.length === 0) {
-      console.log("[process-video] Falling back to thumbnail URLs");
-      frameUrls = getYoutubeThumbnails(videoId);
+      console.log("[process-video] Using thumbnail-only mode");
+      frameUrls = thumbnailUrls;
+    } else {
+      // Append thumbnails as bonus frames
+      frameUrls = [...frameUrls, ...thumbnailUrls];
     }
 
     console.log(`[process-video] Total URLs to download: ${frameUrls.length}`);
