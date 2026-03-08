@@ -325,19 +325,22 @@ function extractStoryboardSpec(playerData: Record<string, unknown>): StoryboardS
 }
 
 async function fetchStoryboardFrameUrls(specs: StoryboardSpec[], _videoId: string): Promise<string[]> {
-  // Use the best quality storyboard
+  // Use the best quality storyboard (first after reverse = highest quality)
   const spec = specs[0];
   const urls: string[] = [];
   const framesPerSheet = spec.rows * spec.cols;
   const sheetCount = Math.ceil(spec.count / framesPerSheet);
 
   console.log(`[process-video] Building ${sheetCount} sheet URLs (${framesPerSheet} frames/sheet)`);
+  console.log(`[process-video] Base URL template: ${spec.baseUrl}`);
 
-  // The base URL has $M placeholder for sheet index (M0.jpg, M1.jpg, etc.)
+  // The storyboard URL uses "$M" as the sheet-index placeholder.
+  // Example: "https://i.ytimg.com/sb/VIDEO/storyboard3_L2/M$M.jpg?sqp=..."
+  // We replace "$M" with the sheet number 0, 1, 2...
   for (let i = 0; i < sheetCount; i++) {
-    // Replace the Mx.jpg suffix pattern with the correct index
-    const sheetUrl = spec.baseUrl.replace(/M(\d*)\.jpg/i, `M${i}.jpg`);
+    const sheetUrl = spec.baseUrl.replace("$M", String(i));
     urls.push(sheetUrl);
+    console.log(`[process-video] Sheet URL ${i}: ${sheetUrl.substring(0, 100)}`);
   }
 
   return urls;
