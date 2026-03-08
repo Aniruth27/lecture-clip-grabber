@@ -373,10 +373,15 @@ function buildStoryboardUrls(spec: StoryboardSpec): string[] {
 
   console.log(`[process-video] Building ${sheetCount} sheet URLs (${framesPerSheet} frames/sheet, ${spec.count} total frames)`);
 
-  // The URL template has "$M" as sheet index placeholder
+  // The URL template has "$M" as sheet index placeholder.
+  // We also strip the "sqp" auth param — it's IP-bound from the browser session
+  // but the storyboard files are accessible without it from the same CDN region.
   for (let i = 0; i < sheetCount; i++) {
-    const sheetUrl = spec.baseUrl.replace("$M", String(i));
+    let sheetUrl = spec.baseUrl.replace("$M", String(i));
+    // Remove sqp param (IP-bound auth token that blocks server-side downloads)
+    sheetUrl = sheetUrl.replace(/[?&]sqp=[^&]*/g, "").replace(/\?&/, "?").replace(/[?&]$/, "");
     urls.push(sheetUrl);
+    if (i < 3) console.log(`[process-video] Sheet URL ${i}: ${sheetUrl}`);
   }
 
   return urls;
