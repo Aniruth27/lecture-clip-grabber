@@ -229,84 +229,49 @@ Deno.serve(async (req) => {
 // ── InnerTube API ─────────────────────────────────────────────────────────────
 
 async function fetchInnerTubePlayer(videoId: string): Promise<Record<string, unknown> | null> {
-  // Try multiple InnerTube client strategies
-  const strategies = [
-    // Strategy 1: TVHTML5 embedded (most permissive, no auth tokens needed)
-    {
-      url: "https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
+  // Use page scraping — it's the most reliable method that returns all storyboard data
+  // The InnerTube direct API requires poToken from 2025 onwards
+  try {
+    const res = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
       headers: {
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (SMART-TV; LINUX; Tizen 5.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/5.0 TV Safari/538.1",
-        "X-YouTube-Client-Name": "85",
-        "X-YouTube-Client-Version": "2.0",
-        "Origin": "https://www.youtube.com",
-        "Referer": "https://www.youtube.com/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       },
-      body: {
-        context: {
-          client: {
-            clientName: "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
-            clientVersion: "2.0",
-            hl: "en",
-            gl: "US",
-          },
-          thirdParty: { embedUrl: "https://www.youtube.com/" },
-        },
-        videoId,
-      },
-    },
-    // Strategy 2: WEB embedded player
-    {
-      url: "https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
-      headers: {
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
-        "X-YouTube-Client-Name": "56",
-        "X-YouTube-Client-Version": "1.20231205.01.00",
-        "Origin": "https://www.youtube.com",
-        "Referer": "https://www.youtube.com/",
-      },
-      body: {
-        context: {
-          client: {
-            clientName: "WEB_EMBEDDED_PLAYER",
-            clientVersion: "1.20231205.01.00",
-            hl: "en",
-            gl: "US",
-          },
-          thirdParty: { embedUrl: "https://www.youtube.com/" },
-        },
-        videoId,
-      },
-    },
-  ];
+    });
 
-  for (const strategy of strategies) {
-    try {
-      const res = await fetch(strategy.url, {
-        method: "POST",
-        headers: strategy.headers,
-        body: JSON.stringify(strategy.body),
-      });
-
-      if (!res.ok) {
-        console.log(`[process-video] Strategy failed: HTTP ${res.status}`);
-        continue;
-      }
-
-      const data = await res.json() as Record<string, unknown>;
-      const status = (data?.playabilityStatus as Record<string, unknown>)?.status;
-      console.log(`[process-video] InnerTube status: ${status}, keys: ${Object.keys(data).join(", ")}`);
-
-      if (status === "OK" || status === "CONTENT_CHECK_REQUIRED") {
-        return data;
-      }
-    } catch (e) {
-      console.error("[process-video] Strategy error:", e);
+    if (!res.ok) {
+      console.log(`[process-video] Page fetch error: HTTP ${res.status}`);
+      return null;
     }
-  }
 
-  return null;
+    const html = await res.text();
+    console.log(`[process-video] Page length: ${html.length}`);
+
+    // Try multiple patterns to find ytInitialPlayerResponse
+    const patterns = [
+      /ytInitialPlayerResponse\s*=\s*(\{.+?\});\s*(?:var |const |let |window\.|<\/script>)/s,
+      /ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;/s,
+    ];
+
+    for (const pat of patterns) {
+      const m = html.match(pat);
+      if (m) {
+        try {
+          const data = JSON.parse(m[1]);
+          const status = (data?.playabilityStatus as Record<string, unknown>)?.status;
+          console.log(`[process-video] Parsed player data, status: ${status}`);
+          return data;
+        } catch { continue; }
+      }
+    }
+
+    console.log("[process-video] Could not parse ytInitialPlayerResponse");
+    return null;
+  } catch (e) {
+    console.error("[process-video] fetchInnerTubePlayer error:", e);
+    return null;
+  }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
