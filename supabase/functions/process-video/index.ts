@@ -229,29 +229,84 @@ Deno.serve(async (req) => {
 // ── InnerTube API ─────────────────────────────────────────────────────────────
 
 async function fetchInnerTubePlayer(videoId: string): Promise<Record<string, unknown> | null> {
-  try {
-    // Use the InnerTube player endpoint directly — Android client gives clean storyboard URLs
-    const res = await fetch(`https://www.youtube.com/youtubei/v1/player`, {
-      method: "POST",
-      headers: INNERTUBE_HEADERS,
-      body: JSON.stringify({
-        ...INNERTUBE_CONTEXT,
+  // Try multiple InnerTube client strategies
+  const strategies = [
+    // Strategy 1: TVHTML5 embedded (most permissive, no auth tokens needed)
+    {
+      url: "https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (SMART-TV; LINUX; Tizen 5.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/5.0 TV Safari/538.1",
+        "X-YouTube-Client-Name": "85",
+        "X-YouTube-Client-Version": "2.0",
+        "Origin": "https://www.youtube.com",
+        "Referer": "https://www.youtube.com/",
+      },
+      body: {
+        context: {
+          client: {
+            clientName: "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
+            clientVersion: "2.0",
+            hl: "en",
+            gl: "US",
+          },
+          thirdParty: { embedUrl: "https://www.youtube.com/" },
+        },
         videoId,
-      }),
-    });
+      },
+    },
+    // Strategy 2: WEB embedded player
+    {
+      url: "https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+        "X-YouTube-Client-Name": "56",
+        "X-YouTube-Client-Version": "1.20231205.01.00",
+        "Origin": "https://www.youtube.com",
+        "Referer": "https://www.youtube.com/",
+      },
+      body: {
+        context: {
+          client: {
+            clientName: "WEB_EMBEDDED_PLAYER",
+            clientVersion: "1.20231205.01.00",
+            hl: "en",
+            gl: "US",
+          },
+          thirdParty: { embedUrl: "https://www.youtube.com/" },
+        },
+        videoId,
+      },
+    },
+  ];
 
-    if (!res.ok) {
-      console.log(`[process-video] InnerTube API error: HTTP ${res.status}`);
-      return null;
+  for (const strategy of strategies) {
+    try {
+      const res = await fetch(strategy.url, {
+        method: "POST",
+        headers: strategy.headers,
+        body: JSON.stringify(strategy.body),
+      });
+
+      if (!res.ok) {
+        console.log(`[process-video] Strategy failed: HTTP ${res.status}`);
+        continue;
+      }
+
+      const data = await res.json() as Record<string, unknown>;
+      const status = (data?.playabilityStatus as Record<string, unknown>)?.status;
+      console.log(`[process-video] InnerTube status: ${status}, keys: ${Object.keys(data).join(", ")}`);
+
+      if (status === "OK" || status === "CONTENT_CHECK_REQUIRED") {
+        return data;
+      }
+    } catch (e) {
+      console.error("[process-video] Strategy error:", e);
     }
-
-    const data = await res.json();
-    console.log(`[process-video] InnerTube response keys: ${Object.keys(data).join(", ")}`);
-    return data as Record<string, unknown>;
-  } catch (e) {
-    console.error("[process-video] fetchInnerTubePlayer error:", e);
-    return null;
   }
+
+  return null;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
